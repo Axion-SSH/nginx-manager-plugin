@@ -1,0 +1,33 @@
+{
+  "author": "Axion Team",
+  "description": "Create, edit, enable, disable, and delete nginx sites; reload or restart the nginx daemon.",
+  "id": "nginx-manager-plugin",
+  "name": "Nginx Manager",
+  "icon": "icon.png",
+  "permissions": [
+    "ssh.exec",
+    "ssh.sudo",
+    "sftp.write"
+  ],
+  "presentations": {
+    "plugin": {
+      "defaultSize": {
+        "h": 620,
+        "w": 780
+      },
+      "entry": "index.html"
+    }
+  },
+  "requirements": [
+    "ls",
+    "cat",
+    "systemctl",
+    "nginx",
+    "mv",
+    "rm",
+    "ln"
+  ],
+  "sdk": "1",
+  "settings": [],
+  "version": "1.0.0"
+}

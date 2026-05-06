@@ -1,0 +1,460 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Nginx Manager</title>
+  <style>
+    body { margin: 0; }
+
+    .modal-backdrop {
+      position: fixed; inset: 0;
+      background: rgba(0, 0, 0, 0.45);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 1000;
+      padding: 24px;
+    }
+    .modal-card {
+      width: min(580px, 100%);
+      max-height: 100%;
+      padding: 20px;
+      display: flex; flex-direction: column; gap: 10px;
+      overflow: hidden;
+    }
+    .modal-card.sm { width: min(420px, 100%); }
+    .modal-card .ax-textarea {
+      flex: 1;
+      min-height: 220px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      white-space: pre;
+    }
+
+    .site-row {
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px 12px;
+      border-radius: var(--radius-sm);
+      background: var(--color-surface-1);
+      border: 1px solid var(--color-border-subtle);
+    }
+    .site-row .name {
+      flex: 1; min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .site-row .actions { display: flex; gap: 4px; flex-shrink: 0; }
+
+    #output {
+      max-height: 180px;
+      overflow: auto;
+      margin: 0;
+      font-size: 12px;
+    }
+
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <main class="ax-container ax-stack" style="gap: 16px;">
+
+    <header class="ax-row" style="justify-content: space-between;">
+      <h1 class="ax-h1">Nginx</h1>
+      <span class="ax-pill" id="status">…</span>
+    </header>
+
+    <section class="ax-surface ax-stack">
+      <div class="ax-row" style="justify-content: space-between;">
+        <span class="ax-label">Daemon</span>
+        <div class="ax-row" style="gap: 6px;">
+          <button class="ax-btn ax-btn-ghost ax-btn-sm" id="test">Test config</button>
+          <button class="ax-btn ax-btn-outline ax-btn-sm" id="reload">Reload</button>
+          <button class="ax-btn ax-btn-outline ax-btn-sm" id="restart">Restart</button>
+        </div>
+      </div>
+      <pre class="ax-code" id="output" hidden></pre>
+    </section>
+
+    <section class="ax-stack">
+      <div class="ax-row" style="justify-content: space-between;">
+        <span class="ax-label">Sites</span>
+        <div class="ax-row" style="gap: 6px;">
+          <button class="ax-btn ax-btn-ghost ax-btn-sm" id="refresh">Refresh</button>
+          <button class="ax-btn ax-btn-primary ax-btn-sm" id="add">New site</button>
+        </div>
+      </div>
+      <div class="ax-stack" id="sites" style="gap: 6px;">
+        <div class="ax-empty"><div>Loading…</div></div>
+      </div>
+    </section>
+
+  </main>
+
+  <div id="edit-modal" class="modal-backdrop" hidden>
+    <div class="ax-glass modal-card">
+      <header class="ax-row" style="justify-content: space-between;">
+        <h2 class="ax-h2" id="edit-title">New site</h2>
+      </header>
+      <label class="ax-label">Name</label>
+      <input class="ax-input" id="site-name" placeholder="example.com" autocomplete="off" spellcheck="false" />
+      <label class="ax-label">Config</label>
+      <textarea class="ax-textarea" id="site-content" spellcheck="false"></textarea>
+      <div class="ax-row" style="justify-content: flex-end; gap: 6px;">
+        <button class="ax-btn ax-btn-ghost" id="edit-cancel">Cancel</button>
+        <button class="ax-btn ax-btn-primary" id="edit-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="confirm-modal" class="modal-backdrop" hidden>
+    <div class="ax-glass modal-card sm">
+      <h2 class="ax-h2" id="confirm-title">Confirm</h2>
+      <p class="ax-text" id="confirm-message"></p>
+      <div class="ax-row" style="justify-content: flex-end; gap: 6px;">
+        <button class="ax-btn ax-btn-ghost" id="confirm-cancel">Cancel</button>
+        <button class="ax-btn ax-btn-danger" id="confirm-ok">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+  const SITES_AVAIL = '/etc/nginx/sites-available';
+  const SITES_EN    = '/etc/nginx/sites-enabled';
+  const SERVICE     = 'nginx';
+  const NAME_RE     = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/;
+
+  const SITE_TEMPLATE =
+`server {
+  listen 80;
+  server_name example.com;
+
+  root /var/www/html;
+  index index.html;
+
+  location / {
+    try_files $uri $uri/ =404;
+  }
+}
+`;
+
+  const $  = (id) => document.getElementById(id);
+  const ax = () => window.axion;
+
+  const statusPill = $('status');
+  const sitesEl    = $('sites');
+  const outputEl   = $('output');
+
+  const editModal   = $('edit-modal');
+  const editTitle   = $('edit-title');
+  const siteNameEl  = $('site-name');
+  const siteCodeEl  = $('site-content');
+
+  const confirmModal   = $('confirm-modal');
+  const confirmTitleEl = $('confirm-title');
+  const confirmMsgEl   = $('confirm-message');
+  const confirmOk      = $('confirm-ok');
+  const confirmCancel  = $('confirm-cancel');
+
+  function shellQuote(s) {
+    return "'" + String(s).replace(/'/g, "'\\''") + "'";
+  }
+
+  async function exec(cmd) {
+    try { return await ax().exec(cmd); }
+    catch (e) {
+      return { stdout: '', stderr: String(e.message || e), exitCode: -1, _err: true };
+    }
+  }
+
+  function setOutput(text, tone) {
+    if (!text) { outputEl.hidden = true; outputEl.textContent = ''; return; }
+    outputEl.hidden = false;
+    outputEl.textContent = text;
+    outputEl.style.color =
+      tone === 'error'   ? 'var(--color-error)'   :
+      tone === 'success' ? 'var(--color-success)' : '';
+  }
+
+  // ---------- Status ----------
+  async function loadStatus() {
+    statusPill.className = 'ax-pill';
+    statusPill.textContent = '…';
+    const r = await exec(`systemctl is-active ${SERVICE}`);
+    const v = (r.stdout || '').trim();
+    if (v === 'active') {
+      statusPill.className = 'ax-pill ax-pill-success';
+      statusPill.textContent = 'Active';
+    } else if (v === 'inactive') {
+      statusPill.className = 'ax-pill';
+      statusPill.textContent = 'Inactive';
+    } else if (v === 'failed') {
+      statusPill.className = 'ax-pill ax-pill-error';
+      statusPill.textContent = 'Failed';
+    } else {
+      statusPill.className = 'ax-pill ax-pill-warn';
+      statusPill.textContent = v || 'Unknown';
+    }
+  }
+
+  // ---------- Sites list ----------
+  async function loadSites() {
+    sitesEl.innerHTML = '';
+    sitesEl.appendChild(emptyEl('Loading…'));
+    const [a, e] = await Promise.all([
+      exec(`ls -1 ${shellQuote(SITES_AVAIL)}`),
+      exec(`ls -1 ${shellQuote(SITES_EN)}`),
+    ]);
+    sitesEl.innerHTML = '';
+    if (a._err || a.exitCode !== 0) {
+      sitesEl.appendChild(emptyEl('Could not list sites', (a.stderr || '').trim(), true));
+      return;
+    }
+    const avail   = (a.stdout || '').split('\n').map(s => s.trim()).filter(Boolean).sort();
+    const enabled = new Set((e.stdout || '').split('\n').map(s => s.trim()).filter(Boolean));
+    if (!avail.length) {
+      sitesEl.appendChild(emptyEl('No sites yet', 'Click New site to create one.'));
+      return;
+    }
+    for (const name of avail) {
+      sitesEl.appendChild(renderSiteRow(name, enabled.has(name)));
+    }
+  }
+
+  function emptyEl(title, body, isError) {
+    const wrap = document.createElement('div');
+    wrap.className = 'ax-empty';
+    const t = document.createElement('div');
+    t.className = 'ax-empty-title' + (isError ? ' ax-text-error' : '');
+    t.textContent = title;
+    wrap.appendChild(t);
+    if (body) {
+      const b = document.createElement('div');
+      b.textContent = body;
+      wrap.appendChild(b);
+    }
+    return wrap;
+  }
+
+  function renderSiteRow(name, isEnabled) {
+    const row = document.createElement('div');
+    row.className = 'site-row';
+
+    const nameEl = document.createElement('span');
+    nameEl.className = 'name ax-text';
+    nameEl.textContent = name;
+    nameEl.title = name;
+
+    const pill = document.createElement('span');
+    pill.className = isEnabled ? 'ax-pill ax-pill-success' : 'ax-pill';
+    pill.textContent = isEnabled ? 'enabled' : 'disabled';
+
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+    actions.appendChild(mkBtn('Edit', 'ax-btn-ghost ax-btn-sm', () => openEdit(name)));
+    actions.appendChild(mkBtn(isEnabled ? 'Disable' : 'Enable', 'ax-btn-outline ax-btn-sm', () => toggleSite(name, isEnabled)));
+    actions.appendChild(mkBtn('Delete', 'ax-btn-ghost ax-btn-sm', () => deleteSite(name, isEnabled)));
+
+    row.append(nameEl, pill, actions);
+    return row;
+  }
+
+  function mkBtn(label, klass, onClick) {
+    const b = document.createElement('button');
+    b.className = 'ax-btn ' + klass;
+    b.textContent = label;
+    b.addEventListener('click', onClick);
+    return b;
+  }
+
+  // ---------- Edit modal ----------
+  let editingName = null;
+
+  async function openEdit(name) {
+    editingName = name;
+    editTitle.textContent = name ? ('Edit ' + name) : 'New site';
+    siteNameEl.value = name || '';
+    siteNameEl.disabled = !!name;
+    siteCodeEl.value = name ? 'Loading…' : SITE_TEMPLATE;
+    editModal.hidden = false;
+    setTimeout(() => (name ? siteCodeEl : siteNameEl).focus(), 0);
+
+    if (name) {
+      const r = await exec(`cat ${shellQuote(SITES_AVAIL + '/' + name)}`);
+      if (r.exitCode === 0) {
+        siteCodeEl.value = r.stdout || '';
+      } else {
+        siteCodeEl.value = '# Could not read config: ' + (r.stderr || '').trim();
+      }
+    }
+  }
+
+  function closeEdit() {
+    editModal.hidden = true;
+    editingName = null;
+  }
+
+  async function saveSite() {
+    const name = (siteNameEl.value || '').trim();
+    if (!NAME_RE.test(name)) {
+      ax().ui.notify('Invalid name. Use letters, digits, dot, underscore, dash.', { tone: 'error' });
+      siteNameEl.focus();
+      return;
+    }
+    const content = siteCodeEl.value;
+    const tmp = `/tmp/.nginx-mgr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.conf`;
+
+    try {
+      await ax().sftp.write(tmp, new TextEncoder().encode(content));
+    } catch (e) {
+      ax().ui.notify('Could not write temp file: ' + (e.message || e), { tone: 'error' });
+      return;
+    }
+
+    try {
+      await ax().sudo(`mv ${shellQuote(tmp)} ${shellQuote(SITES_AVAIL + '/' + name)}`);
+      ax().ui.notify(editingName ? `Updated ${name}` : `Created ${name}`, { tone: 'success' });
+      closeEdit();
+      loadSites();
+    } catch (e) {
+      if (e.code !== 'E_SUDO_CANCELLED') {
+        ax().ui.notify('Save failed: ' + (e.message || e), { tone: 'error' });
+      }
+      await exec(`rm -f ${shellQuote(tmp)}`);
+    }
+  }
+
+  // ---------- Site actions ----------
+  async function toggleSite(name, isEnabled) {
+    try {
+      if (isEnabled) {
+        await ax().sudo(`rm ${shellQuote(SITES_EN + '/' + name)}`);
+        ax().ui.notify(`${name} disabled`);
+      } else {
+        await ax().sudo(`ln -sf ${shellQuote(SITES_AVAIL + '/' + name)} ${shellQuote(SITES_EN + '/' + name)}`);
+        ax().ui.notify(`${name} enabled`, { tone: 'success' });
+      }
+      loadSites();
+    } catch (e) {
+      if (e.code !== 'E_SUDO_CANCELLED') {
+        ax().ui.notify('Action failed: ' + (e.message || e), { tone: 'error' });
+      }
+    }
+  }
+
+  async function deleteSite(name, isEnabled) {
+    const ok = await confirmDialog(
+      'Delete site',
+      `Delete "${name}"?` + (isEnabled ? ' It is currently enabled — the symlink will also be removed.' : '')
+    );
+    if (!ok) return;
+    const targets = [SITES_AVAIL + '/' + name];
+    if (isEnabled) targets.unshift(SITES_EN + '/' + name);
+    try {
+      await ax().sudo('rm -f ' + targets.map(shellQuote).join(' '));
+      ax().ui.notify(`${name} deleted`, { tone: 'success' });
+      loadSites();
+    } catch (e) {
+      if (e.code !== 'E_SUDO_CANCELLED') {
+        ax().ui.notify('Delete failed: ' + (e.message || e), { tone: 'error' });
+      }
+    }
+  }
+
+  // ---------- Daemon actions ----------
+  async function testConfig() {
+    setOutput('Testing…');
+    try {
+      const r = await ax().sudo('nginx -t');
+      const text = (r.stderr || r.stdout || '').trim();
+      if (r.exitCode === 0) {
+        setOutput(text || 'Config OK', 'success');
+        ax().ui.notify('Config OK', { tone: 'success' });
+      } else {
+        setOutput(text || 'Test failed (no output)', 'error');
+        ax().ui.notify('Config test failed', { tone: 'error' });
+      }
+    } catch (e) {
+      if (e.code === 'E_SUDO_CANCELLED') { setOutput(''); return; }
+      setOutput('Error: ' + (e.message || e), 'error');
+    }
+  }
+
+  async function reloadDaemon() {
+    setOutput('Reloading…');
+    try {
+      const r = await ax().sudo(`systemctl reload ${SERVICE}`);
+      if (r.exitCode === 0) {
+        setOutput('Reloaded.', 'success');
+        ax().ui.notify('Reloaded nginx', { tone: 'success' });
+      } else {
+        setOutput((r.stderr || r.stdout || '').trim() || 'Reload failed', 'error');
+        ax().ui.notify('Reload failed', { tone: 'error' });
+      }
+    } catch (e) {
+      if (e.code === 'E_SUDO_CANCELLED') { setOutput(''); return; }
+      setOutput('Error: ' + (e.message || e), 'error');
+    }
+    loadStatus();
+  }
+
+  async function restartDaemon() {
+    const ok = await confirmDialog(
+      'Restart nginx',
+      'Restart the nginx service? Active connections will be interrupted briefly.'
+    );
+    if (!ok) return;
+    setOutput('Restarting…');
+    try {
+      const r = await ax().sudo(`systemctl restart ${SERVICE}`);
+      if (r.exitCode === 0) {
+        setOutput('Restarted.', 'success');
+        ax().ui.notify('Restarted nginx', { tone: 'success' });
+      } else {
+        setOutput((r.stderr || r.stdout || '').trim() || 'Restart failed', 'error');
+        ax().ui.notify('Restart failed', { tone: 'error' });
+      }
+    } catch (e) {
+      if (e.code === 'E_SUDO_CANCELLED') { setOutput(''); return; }
+      setOutput('Error: ' + (e.message || e), 'error');
+    }
+    loadStatus();
+  }
+
+  // ---------- Confirm modal ----------
+  let confirmResolve = null;
+  function confirmDialog(title, message) {
+    confirmTitleEl.textContent = title;
+    confirmMsgEl.textContent = message;
+    confirmModal.hidden = false;
+    return new Promise((res) => { confirmResolve = res; });
+  }
+  function settleConfirm(value) {
+    confirmModal.hidden = true;
+    if (confirmResolve) { const r = confirmResolve; confirmResolve = null; r(value); }
+  }
+  confirmOk.addEventListener('click', () => settleConfirm(true));
+  confirmCancel.addEventListener('click', () => settleConfirm(false));
+  confirmModal.addEventListener('click', (e) => { if (e.target === confirmModal) settleConfirm(false); });
+
+  // ---------- Wire up ----------
+  $('test').addEventListener('click', testConfig);
+  $('reload').addEventListener('click', reloadDaemon);
+  $('restart').addEventListener('click', restartDaemon);
+  $('refresh').addEventListener('click', () => { loadStatus(); loadSites(); });
+  $('add').addEventListener('click', () => openEdit(null));
+  $('edit-cancel').addEventListener('click', closeEdit);
+  $('edit-save').addEventListener('click', saveSite);
+  editModal.addEventListener('click', (e) => { if (e.target === editModal) closeEdit(); });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      if (!confirmModal.hidden) settleConfirm(false);
+      else if (!editModal.hidden) closeEdit();
+    }
+  });
+
+  ax()?.on('ready', () => {
+    ax().window?.setTitle('Nginx Manager');
+    loadStatus();
+    loadSites();
+  });
+</script>
+</body>
+</html>
