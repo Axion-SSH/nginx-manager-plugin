@@ -1,19 +1,20 @@
 {
   "author": "Axion Team",
-  "description": "Create, edit, enable, disable, and delete nginx sites; reload or restart the nginx daemon.",
+  "description": "Manage nginx end-to-end: sites, main config, conf.d, snippets, logs, SSL certs and the daemon itself.",
+  "icon": "icon.png",
   "id": "nginx-manager-plugin",
   "name": "Nginx Manager",
-  "icon": "icon.png",
   "permissions": [
     "ssh.exec",
     "ssh.sudo",
-    "sftp.write"
+    "sftp.write",
+    "terminal.open"
   ],
   "presentations": {
     "plugin": {
       "defaultSize": {
-        "h": 620,
-        "w": 780
+        "h": 720,
+        "w": 980
       },
       "entry": "index.html"
     }
@@ -21,13 +22,34 @@
   "requirements": [
     "ls",
     "cat",
+    "tail",
+    "bash",
     "systemctl",
     "nginx",
     "mv",
     "rm",
-    "ln"
+    "ln",
+    "cp",
+    "openssl",
+    "ps",
+    "curl"
   ],
   "sdk": "1",
-  "settings": [],
-  "version": "1.0.0"
+  "settings": [
+    { "name": "sitesAvailable", "title": "Sites available path", "type": "string", "default": "/etc/nginx/sites-available" },
+    { "name": "sitesEnabled",   "title": "Sites enabled path",   "type": "string", "default": "/etc/nginx/sites-enabled" },
+    { "name": "confDir",        "title": "conf.d path",          "type": "string", "default": "/etc/nginx/conf.d" },
+    { "name": "snippetsDir",    "title": "snippets path",        "type": "string", "default": "/etc/nginx/snippets" },
+    { "name": "nginxConf",      "title": "Main nginx.conf path", "type": "string", "default": "/etc/nginx/nginx.conf" },
+    { "name": "logsDir",        "title": "Logs directory",       "type": "string", "default": "/var/log/nginx" },
+    { "name": "letsencryptDir", "title": "Let's Encrypt path",   "type": "string", "default": "/etc/letsencrypt" },
+    { "name": "service",        "title": "systemd service",      "type": "string", "default": "nginx" },
+    { "name": "stubStatusUrl",  "title": "stub_status URL",      "type": "string", "default": "http://127.0.0.1/nginx_status",
+      "description": "Leave blank to disable the live metrics card." },
+    { "name": "statusPollSec",  "title": "Status poll (sec)",    "type": "number", "default": 15, "min": 0, "max": 600,
+      "description": "How often to refresh the daemon status pill. 0 disables polling." },
+    { "name": "backupCount",    "title": "Backups per file",     "type": "number", "default": 5,  "min": 0, "max": 50,
+      "description": "How many previous versions to keep in plugin storage for History." }
+  ],
+  "version": "2.0.0"
 }
