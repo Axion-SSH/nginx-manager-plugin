@@ -749,6 +749,25 @@
     return p;
   }
 
+  function outputDialog(o) {
+    o = Object.assign({ title: 'Result', text: '', tone: 'info' }, o || {});
+    const closeBtn = el('button', { class: 'ax-btn ax-btn-primary' }, 'Close');
+    const pre = el('pre', { class: 'ax-code', style: {
+      minHeight: '200px', maxHeight: '420px',
+      overflow: 'auto', fontSize: '11px',
+      whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+      color: o.tone === 'error' ? 'var(--color-error)' : '',
+    } }, o.text || '(no output)');
+    const card = el('div', { class: 'ax-glass modal-card lg' },
+      el('h2', { class: 'ax-h2' }, o.title),
+      pre,
+      el('div', { class: 'modal-foot' }, closeBtn),
+    );
+    const p = show(card);
+    closeBtn.addEventListener('click', () => stack[stack.length - 1].resolve(true));
+    return p;
+  }
+
   function historyDialog(o) {
     o = Object.assign({ title: 'History', items: [], currentContent: '', onRestore: null }, o || {});
     const list = el('div', { class: 'ax-stack', style: { gap: '6px' } });
@@ -1423,23 +1442,24 @@
   async function showSsl() {
     if (!sslContainer) return;
     sslContainer.innerHTML = '';
-    const scanBtn = el('button', { class: 'ax-btn ax-btn-primary ax-btn-sm', onclick: scanCerts }, 'Scan certificates');
-    const termBtn = el('button', { class: 'ax-btn ax-btn-ghost ax-btn-sm', onclick: openSslInTerminal }, 'Open in terminal');
+    const scanBtn     = el('button', { class: 'ax-btn ax-btn-primary ax-btn-sm', onclick: scanCerts }, 'Scan certificates');
+    const renewAllBtn = el('button', { class: 'ax-btn ax-btn-outline ax-btn-sm', onclick: renewAllCerts }, 'Renew all');
+    const termBtn     = el('button', { class: 'ax-btn ax-btn-ghost ax-btn-sm', onclick: openSslInTerminal }, 'Open in terminal');
     const head = el('div', { class: 'ax-row', style: { justifyContent: 'space-between' } },
       el('div', { class: 'ax-stack', style: { gap: '2px' } },
         el('span', { class: 'ax-label' }, "Let's Encrypt certificates"),
         el('span', { class: 'ax-text-muted', style: { fontSize: '11px' } }, paths.letsencryptDir),
       ),
-      el('div', { class: 'ax-row', style: { gap: '6px' } }, termBtn, scanBtn),
+      el('div', { class: 'ax-row', style: { gap: '6px' } }, termBtn, renewAllBtn, scanBtn),
     );
     const note = el('div', { class: 'muted-block' },
-      'Scanning will prompt for sudo because ',
+      'Scanning prompts for sudo because ',
       el('span', { class: 'ax-mono' }, paths.letsencryptDir),
-      ' is typically root-only. Renewal is not run from inside the plugin - click ',
-      el('strong', {}, 'Open in terminal'),
-      ' and run ',
+      ' is typically root-only. ',
+      el('strong', {}, 'Renew'),
+      ' runs ',
       el('span', { class: 'ax-mono' }, 'sudo certbot renew'),
-      ' (or install certbot first if it\'s missing).',
+      ' through bash; if certbot is not installed on the remote, the action will surface the error.',
     );
     const list = el('div', { class: 'ax-stack', id: 'ssl-list', style: { gap: '6px' } },
       el('div', { class: 'ax-empty' },
@@ -1502,7 +1522,64 @@
         meta,
       ),
       el('span', { class: pillClass }, pillText),
+      el('button', {
+        class: 'ax-btn ax-btn-outline ax-btn-sm',
+        onclick: () => renewCert(c.name),
+      }, 'Renew'),
     );
+  }
+
+  // Run certbot through bash so we don't have to declare it in
+  // requirements (which would prevent the plugin from loading on hosts
+  // without certbot). bash itself is broad-power and already declared.
+  async function runCertbot(args) {
+    const cmd = 'certbot ' + args.map(shellQuote).join(' ') + ' 2>&1';
+    try {
+      const r = await sudo('bash -c ' + shellQuote(cmd));
+      return { ok: r.exitCode === 0, output: (r.stdout || '').trim(), exitCode: r.exitCode };
+    } catch (e) {
+      return { ok: false, _ex: e, error: e.message || String(e) };
+    }
+  }
+
+  async function renewCert(certName) {
+    const ok = await confirmDialog({
+      title: 'Renew ' + certName,
+      message: 'Run sudo certbot renew --cert-name ' + certName + '? This may take 10-60 seconds with no progress feedback.',
+      okText: 'Renew',
+      danger: false,
+    });
+    if (!ok) return;
+    notify('Renewing ' + certName + '...');
+    const r = await runCertbot(['renew', '--cert-name', certName, '--non-interactive']);
+    if (r._ex && isSudoCancel(r._ex)) return;
+    await outputDialog({
+      title: r.ok ? ('Renewal complete: ' + certName) : ('Renewal failed: ' + certName),
+      text: r.output || r.error || '(no output)',
+      tone: r.ok ? 'info' : 'error',
+    });
+    if (r.ok) { notify('Renewed ' + certName, 'success'); setPending(true); }
+    scanCerts();
+  }
+
+  async function renewAllCerts() {
+    const ok = await confirmDialog({
+      title: 'Renew all certificates',
+      message: 'Run sudo certbot renew? Only certs near expiry will actually renew. May take a while with no progress feedback.',
+      okText: 'Renew all',
+      danger: false,
+    });
+    if (!ok) return;
+    notify('Running certbot renew...');
+    const r = await runCertbot(['renew', '--non-interactive']);
+    if (r._ex && isSudoCancel(r._ex)) return;
+    await outputDialog({
+      title: r.ok ? 'Renewal complete' : 'Renewal failed',
+      text: r.output || r.error || '(no output)',
+      tone: r.ok ? 'info' : 'error',
+    });
+    if (r.ok) { notify('Renewal complete', 'success'); setPending(true); }
+    scanCerts();
   }
 
   function emptyError(title, body) {
@@ -1847,14 +1924,22 @@
   }
 
   async function renderSystemctl() {
-    const pre = el('pre', { class: 'ax-code', style: { marginTop: '6px', fontSize: '11px', maxHeight: '260px', overflow: 'auto', whiteSpace: 'pre' } }, 'Loading...');
+    const pre = el('pre', { class: 'ax-code', style: {
+      marginTop: '6px', fontSize: '11px',
+      minHeight: '220px', maxHeight: '320px',
+      overflow: 'auto', whiteSpace: 'pre',
+    } }, 'Loading...');
     statusContainer.appendChild(pre);
     try { pre.textContent = (await daemonStatusText()).trim() || '(no output)'; }
     catch (e) { pre.textContent = 'Error: ' + (e.message || e); pre.style.color = 'var(--color-error)'; }
   }
 
   async function renderVersion() {
-    const pre = el('pre', { class: 'ax-code', style: { marginTop: '6px', fontSize: '11px', whiteSpace: 'pre-wrap' } }, 'Loading...');
+    const pre = el('pre', { class: 'ax-code', style: {
+      marginTop: '6px', fontSize: '11px',
+      minHeight: '120px', maxHeight: '240px',
+      overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+    } }, 'Loading...');
     statusContainer.appendChild(pre);
     try { pre.textContent = (await nginxVersionText()) || '(no output)'; }
     catch (e) { pre.textContent = 'Error: ' + (e.message || e); pre.style.color = 'var(--color-error)'; }
