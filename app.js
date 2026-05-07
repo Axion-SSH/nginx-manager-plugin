@@ -163,6 +163,97 @@
     return typeof name === 'string' && FILENAME_RE.test(name) && !name.includes('/') && name !== '.' && name !== '..';
   }
 
+  // Custom select with full theme control. Native <option> styling is
+  // locked down in Chromium webviews, so we render our own popup.
+  // Returns a div whose `.value` getter/setter mirrors a native select,
+  // and which fires a 'change' event on selection. Pass setOptions(arr)
+  // to swap options later.
+  function mkSelect(options, cfg) {
+    cfg = cfg || {};
+    let opts = (options || []).slice();
+    let value = cfg.value != null ? cfg.value : (opts[0] ? opts[0].value : '');
+    let isOpen = false;
+
+    const labelEl = el('span', { class: 'label' });
+    const arrow   = el('span', { class: 'arrow' }, '▾');
+    const trigger = el('button', { class: 'nm-select-trigger', type: 'button' }, labelEl, arrow);
+    const popup   = el('div', { class: 'nm-select-popup', hidden: true });
+    const root    = el('div', { class: 'nm-select' }, trigger, popup);
+
+    function findOpt(v) { return opts.find(o => o.value === v) || null; }
+
+    function refreshLabel() {
+      const o = findOpt(value);
+      labelEl.textContent = o ? o.label : (cfg.placeholder || '');
+    }
+
+    function renderItems() {
+      popup.innerHTML = '';
+      for (const o of opts) {
+        const item = el('div', {
+          class: 'nm-select-option' +
+                 (o.value === value ? ' selected' : '') +
+                 (o.disabled ? ' disabled' : ''),
+        }, o.label);
+        if (!o.disabled) item.addEventListener('click', () => pick(o.value));
+        popup.appendChild(item);
+      }
+    }
+
+    function pick(v) {
+      const changed = v !== value;
+      value = v;
+      refreshLabel();
+      close();
+      if (changed) {
+        if (cfg.onChange) try { cfg.onChange(v); } catch (_) {}
+        root.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    }
+
+    function open() {
+      if (isOpen || !opts.length) return;
+      isOpen = true;
+      root.classList.add('open');
+      renderItems();
+      popup.hidden = false;
+      // Defer attaching outside-click so the same click that opened
+      // doesn't immediately close.
+      setTimeout(() => {
+        document.addEventListener('mousedown', outside, true);
+        document.addEventListener('keydown', keys, true);
+      }, 0);
+    }
+
+    function close() {
+      if (!isOpen) return;
+      isOpen = false;
+      root.classList.remove('open');
+      popup.hidden = true;
+      document.removeEventListener('mousedown', outside, true);
+      document.removeEventListener('keydown', keys, true);
+    }
+
+    function outside(e) { if (!root.contains(e.target)) close(); }
+    function keys(e) { if (e.key === 'Escape') { e.stopPropagation(); close(); } }
+
+    trigger.addEventListener('click', (e) => { e.stopPropagation(); isOpen ? close() : open(); });
+
+    Object.defineProperty(root, 'value', {
+      get: () => value,
+      set: (v) => { value = v; refreshLabel(); if (isOpen) renderItems(); },
+    });
+    root.setOptions = (newOpts) => {
+      opts = (newOpts || []).slice();
+      if (!findOpt(value)) value = opts[0] ? opts[0].value : '';
+      refreshLabel();
+      if (isOpen) renderItems();
+    };
+
+    refreshLabel();
+    return root;
+  }
+
   /* =========================================================================
    * TEMPLATES
    * ========================================================================= */
@@ -665,28 +756,29 @@
 
     let templateBar = null;
     if (o.templates && o.templates.length) {
-      const sel = el('select', { class: 'ax-select' },
-        el('option', { value: '' }, 'Insert template...'),
-        ...o.templates.map(t => el('option', { value: t.id }, t.name)),
+      const sel = mkSelect(
+        [{ value: '', label: 'Insert template...' }]
+          .concat(o.templates.map(t => ({ value: t.id, label: t.name }))),
+        {
+          onChange: async (id) => {
+            const t = o.templates.find(x => x.id === id);
+            if (!t) return;
+            const cur = codeArea.value.trim();
+            if (cur && cur !== originalContent.trim()) {
+              const ok = await confirmDialog({
+                title: 'Replace contents?',
+                message: 'This will overwrite the editor with the selected template.',
+                okText: 'Replace',
+                danger: false,
+              });
+              if (!ok) { sel.value = ''; return; }
+            }
+            codeArea.value = t.content;
+            sel.value = '';
+            codeArea.focus();
+          },
+        },
       );
-      sel.addEventListener('change', async (e) => {
-        const id = e.target.value;
-        const t = o.templates.find(x => x.id === id);
-        if (!t) return;
-        const cur = codeArea.value.trim();
-        if (cur && cur !== originalContent.trim()) {
-          const ok = await confirmDialog({
-            title: 'Replace contents?',
-            message: 'This will overwrite the editor with the selected template.',
-            okText: 'Replace',
-            danger: false,
-          });
-          if (!ok) { sel.value = ''; return; }
-        }
-        codeArea.value = t.content;
-        sel.value = '';
-        codeArea.focus();
-      });
       templateBar = el('div', { class: 'ax-row' },
         el('span', { class: 'ax-text-muted', style: { fontSize: '11px' } }, 'Templates:'),
         sel,
@@ -1337,14 +1429,14 @@
     if (!logsContainer) return;
     logsContainer.innerHTML = '';
 
-    logsPicker = el('select', { class: 'ax-select' }, el('option', { value: '' }, 'Loading...'));
-    logsPicker.addEventListener('change', () => { logsUseSudo = false; refreshLogs(); });
+    logsPicker = mkSelect([{ value: '', label: 'Loading...' }], {
+      onChange: () => { logsUseSudo = false; refreshLogs(); },
+    });
 
-    logsLines = el('select', { class: 'ax-select' },
-      ...['100','200','500','1000','5000'].map(n => el('option', { value: n }, n + ' lines')),
+    logsLines = mkSelect(
+      ['100','200','500','1000','5000'].map(n => ({ value: n, label: n + ' lines' })),
+      { value: '500', onChange: refreshLogs },
     );
-    logsLines.value = '500';
-    logsLines.addEventListener('change', refreshLogs);
 
     logsFilter = el('input', { class: 'ax-input', placeholder: 'Filter (substring)...' });
     logsFilter.addEventListener('input', debounce(applyLogsFilter, 100));
@@ -1354,8 +1446,12 @@
 
     logsAuto = el('input', { type: 'checkbox' });
     logsAuto.addEventListener('change', () => { logsAuto.checked ? startLogsPoll() : stopLogsPoll(); });
-    const autoLbl = el('label', { class: 'ax-row', style: { gap: '4px', fontSize: '12px', color: 'var(--color-text-secondary)' } },
-      logsAuto, document.createTextNode('Auto-refresh (5s)'),
+    const autoLbl = el('label', { class: 'ax-row', style: { gap: '8px', fontSize: '12px', color: 'var(--color-text-secondary)', cursor: 'pointer' } },
+      el('span', { class: 'ax-toggle' },
+        logsAuto,
+        el('span', { class: 'track' }),
+      ),
+      document.createTextNode('Auto-refresh (5s)'),
     );
 
     const bar = el('div', { class: 'log-bar' }, logsPicker, logsLines, logsFilter, refreshBtn, bottomBtn, autoLbl);
@@ -1385,9 +1481,11 @@
         { path: paths.logsDir + '/error.log',  label: 'error.log'  },
       ];
     }
-    logsPicker.innerHTML = '';
-    if (!logsKnown.length) { logsPicker.appendChild(el('option', { value: '' }, '(no logs found)')); return; }
-    for (const k of logsKnown) logsPicker.appendChild(el('option', { value: k.path }, k.label));
+    if (!logsKnown.length) {
+      logsPicker.setOptions([{ value: '', label: '(no logs found)' }]);
+      return;
+    }
+    logsPicker.setOptions(logsKnown.map(k => ({ value: k.path, label: k.label })));
   }
 
   async function refreshLogs() {
